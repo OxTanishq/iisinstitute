@@ -1,0 +1,798 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOptionalId(id) {
+      return id is string && id.size() <= 128 && (id.size() == 0 || id.matches('^[a-zA-Z0-9_\\-]+$'));
+    }
+
+    function isShortText(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isPeriodString(val) {
+      return val is string && val.size() == 7 && val.matches('^[0-9]{4}-[0-9]{2}$');
+    }
+
+    function isDateString(val) {
+      return val is string && val.size() >= 8 && val.size() <= 16;
+    }
+
+    function isOptionalDateString(val) {
+      return val is string && val.size() <= 16;
+    }
+
+    function isNonNegInt(val) {
+      return val is int && val >= 0 && val <= 100000000000;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedOwner() {
+      return isVerified() && request.auth.token.email == 'tanishq.me.me.me@gmail.com';
+    }
+
+    function hasActiveUserRole(targetRole) {
+      return isVerified() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'ACTIVE' &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == targetRole;
+    }
+
+    function isAdmin() {
+      return isBootstrappedOwner() || hasActiveUserRole('ADMIN');
+    }
+
+    function isAccountant() {
+      return hasActiveUserRole('ACCOUNTANT');
+    }
+
+    function isFinanceStaff() {
+      return isAdmin() || isAccountant();
+    }
+
+    function isTeacher() {
+      return hasActiveUserRole('TEACHER');
+    }
+
+    function isBoundedStringList(arr, maxItems) {
+      return arr is list && arr.size() <= maxItems && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 128));
+    }
+
+    function isAuthorizedFinanceListViewer() {
+      return isBootstrappedOwner() ||
+        existing().createdBy == request.auth.uid ||
+        (request.auth.uid in existing().financeViewerUids);
+    }
+
+    // ---------------------------------------------------------
+    // Entity Validation Blueprints
+    // ---------------------------------------------------------
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'teacherId', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'teacherId', 'status', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        isShortText(data.email, 3, 160) &&
+        isShortText(data.displayName, 1, 120) &&
+        (data.role in ['ADMIN', 'TEACHER', 'ACCOUNTANT']) &&
+        isOptionalId(data.teacherId) &&
+        (data.status in ['ACTIVE', 'SUSPENDED']) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidInstituteSettings(data) {
+      return data.keys().hasAll(['instituteName', 'logoUrl', 'tagline', 'phone', 'email', 'address', 'city', 'receiptPrefix', 'defaultDueDay', 'financialYearStartMonth', 'updatedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['instituteName', 'logoUrl', 'tagline', 'phone', 'email', 'address', 'city', 'receiptPrefix', 'defaultDueDay', 'financialYearStartMonth', 'updatedBy', 'createdAt', 'updatedAt']) &&
+        isShortText(data.instituteName, 2, 140) &&
+        isShortText(data.logoUrl, 0, 500) &&
+        isShortText(data.tagline, 0, 200) &&
+        isShortText(data.phone, 0, 32) &&
+        isShortText(data.email, 0, 160) &&
+        isShortText(data.address, 0, 300) &&
+        isShortText(data.city, 0, 80) &&
+        isShortText(data.receiptPrefix, 1, 16) &&
+        data.defaultDueDay is int && data.defaultDueDay >= 1 && data.defaultDueDay <= 28 &&
+        data.financialYearStartMonth is int && data.financialYearStartMonth >= 1 && data.financialYearStartMonth <= 12 &&
+        data.updatedBy == request.auth.uid &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCourse(data) {
+      return data.keys().hasAll(['code', 'name', 'subjectCategory', 'defaultMonthlyFeePaise', 'durationMonths', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['code', 'name', 'subjectCategory', 'defaultMonthlyFeePaise', 'durationMonths', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isShortText(data.code, 2, 32) &&
+        isShortText(data.name, 2, 120) &&
+        isShortText(data.subjectCategory, 0, 80) &&
+        isNonNegInt(data.defaultMonthlyFeePaise) &&
+        data.durationMonths is int && data.durationMonths >= 1 && data.durationMonths <= 60 &&
+        (data.status in ['ACTIVE', 'ARCHIVED']) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidBatch(data) {
+      return data.keys().hasAll(['code', 'name', 'courseId', 'courseName', 'teacherId', 'teacherUid', 'teacherName', 'scheduleLabel', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['code', 'name', 'courseId', 'courseName', 'teacherId', 'teacherUid', 'teacherName', 'scheduleLabel', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isShortText(data.code, 2, 32) &&
+        isShortText(data.name, 2, 120) &&
+        isValidId(data.courseId) &&
+        isShortText(data.courseName, 1, 120) &&
+        isValidId(data.teacherId) &&
+        isOptionalId(data.teacherUid) &&
+        isShortText(data.teacherName, 1, 120) &&
+        isShortText(data.scheduleLabel, 0, 120) &&
+        (data.status in ['ACTIVE', 'ARCHIVED']) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTeacher(data) {
+      return data.keys().hasAll(['teacherCode', 'fullName', 'email', 'phone', 'specialization', 'subjects', 'linkedUserUid', 'joinedDate', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['teacherCode', 'fullName', 'email', 'phone', 'specialization', 'subjects', 'linkedUserUid', 'joinedDate', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isShortText(data.teacherCode, 2, 32) &&
+        isShortText(data.fullName, 2, 120) &&
+        isShortText(data.email, 3, 160) &&
+        isShortText(data.phone, 0, 32) &&
+        isShortText(data.specialization, 0, 120) &&
+        isBoundedStringList(data.subjects, 10) &&
+        isOptionalId(data.linkedUserUid) &&
+        isDateString(data.joinedDate) &&
+        (data.status in ['ACTIVE', 'ARCHIVED']) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStudent(data) {
+      return data.keys().hasAll(['studentCode', 'fullName', 'primaryCourseId', 'primaryCourseName', 'courseIds', 'batchId', 'batchName', 'enrollmentDate', 'monthlyFeePaise', 'paymentSchedule', 'status', 'guardianName', 'guardianPhone', 'assignedTeacherId', 'assignedTeacherUid', 'assignedTeacherName', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['studentCode', 'fullName', 'primaryCourseId', 'primaryCourseName', 'courseIds', 'batchId', 'batchName', 'enrollmentDate', 'monthlyFeePaise', 'paymentSchedule', 'status', 'guardianName', 'guardianPhone', 'assignedTeacherId', 'assignedTeacherUid', 'assignedTeacherName', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isShortText(data.studentCode, 2, 32) &&
+        isShortText(data.fullName, 2, 120) &&
+        isValidId(data.primaryCourseId) &&
+        isShortText(data.primaryCourseName, 1, 120) &&
+        isBoundedStringList(data.courseIds, 10) &&
+        isValidId(data.batchId) &&
+        isShortText(data.batchName, 1, 120) &&
+        isDateString(data.enrollmentDate) &&
+        isNonNegInt(data.monthlyFeePaise) &&
+        (data.paymentSchedule in ['MONTHLY', 'QUARTERLY', 'CUSTOM']) &&
+        (data.status in ['ACTIVE', 'INACTIVE', 'ARCHIVED']) &&
+        isShortText(data.guardianName, 0, 120) &&
+        isShortText(data.guardianPhone, 0, 32) &&
+        isValidId(data.assignedTeacherId) &&
+        isOptionalId(data.assignedTeacherUid) &&
+        isShortText(data.assignedTeacherName, 1, 120) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidEnrollment(data) {
+      return data.keys().hasAll(['studentId', 'studentName', 'courseId', 'courseName', 'batchId', 'teacherId', 'assignedTeacherUid', 'agreedFeePaise', 'startDate', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['studentId', 'studentName', 'courseId', 'courseName', 'batchId', 'teacherId', 'assignedTeacherUid', 'agreedFeePaise', 'startDate', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.studentId) &&
+        isShortText(data.studentName, 1, 120) &&
+        isValidId(data.courseId) &&
+        isShortText(data.courseName, 1, 120) &&
+        isValidId(data.batchId) &&
+        isValidId(data.teacherId) &&
+        isOptionalId(data.assignedTeacherUid) &&
+        isNonNegInt(data.agreedFeePaise) &&
+        isDateString(data.startDate) &&
+        (data.status in ['ACTIVE', 'COMPLETED', 'DROPPED']) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidInvoice(data) {
+      return data.keys().hasAll(['invoiceNumber', 'studentId', 'studentName', 'courseId', 'courseName', 'batchId', 'billingPeriod', 'grossAmountPaise', 'discountPaise', 'netAmountDuePaise', 'paidAmountPaise', 'balanceDuePaise', 'dueDate', 'status', 'assignedTeacherId', 'notes', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['invoiceNumber', 'studentId', 'studentName', 'courseId', 'courseName', 'batchId', 'billingPeriod', 'grossAmountPaise', 'discountPaise', 'netAmountDuePaise', 'paidAmountPaise', 'balanceDuePaise', 'dueDate', 'status', 'assignedTeacherId', 'notes', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isShortText(data.invoiceNumber, 3, 48) &&
+        isValidId(data.studentId) &&
+        isShortText(data.studentName, 1, 120) &&
+        isValidId(data.courseId) &&
+        isShortText(data.courseName, 1, 120) &&
+        isOptionalId(data.batchId) &&
+        isPeriodString(data.billingPeriod) &&
+        isNonNegInt(data.grossAmountPaise) &&
+        isNonNegInt(data.discountPaise) &&
+        isNonNegInt(data.netAmountDuePaise) &&
+        isNonNegInt(data.paidAmountPaise) &&
+        isNonNegInt(data.balanceDuePaise) &&
+        data.discountPaise <= data.grossAmountPaise &&
+        data.netAmountDuePaise == data.grossAmountPaise - data.discountPaise &&
+        isDateString(data.dueDate) &&
+        (data.status in ['PENDING', 'PARTIAL', 'PAID', 'OVERDUE', 'CANCELLED']) &&
+        (data.status != 'PAID' || (data.paidAmountPaise >= data.netAmountDuePaise && data.balanceDuePaise == 0)) &&
+        isOptionalId(data.assignedTeacherId) &&
+        isShortText(data.notes, 0, 300) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPayment(data) {
+      return data.keys().hasAll(['receiptNumber', 'idempotencyKey', 'invoiceId', 'studentId', 'studentName', 'courseId', 'courseName', 'billingPeriod', 'amountPaise', 'paymentMethod', 'paymentDate', 'referenceNote', 'status', 'reversalReason', 'financeViewerUids', 'recordedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['receiptNumber', 'idempotencyKey', 'invoiceId', 'studentId', 'studentName', 'courseId', 'courseName', 'billingPeriod', 'amountPaise', 'paymentMethod', 'paymentDate', 'referenceNote', 'status', 'reversalReason', 'financeViewerUids', 'recordedBy', 'createdAt', 'updatedAt']) &&
+        isShortText(data.receiptNumber, 3, 48) &&
+        isShortText(data.idempotencyKey, 6, 96) && data.idempotencyKey.matches('^[a-zA-Z0-9_\\-]+$') &&
+        isValidId(data.invoiceId) &&
+        isValidId(data.studentId) &&
+        isShortText(data.studentName, 1, 120) &&
+        isOptionalId(data.courseId) &&
+        isShortText(data.courseName, 1, 120) &&
+        isPeriodString(data.billingPeriod) &&
+        data.amountPaise is int && data.amountPaise > 0 && data.amountPaise <= 100000000000 &&
+        (data.paymentMethod in ['CASH', 'UPI', 'BANK_TRANSFER']) &&
+        isDateString(data.paymentDate) &&
+        isShortText(data.referenceNote, 0, 200) &&
+        (data.status in ['COMPLETED', 'REVERSED']) &&
+        isShortText(data.reversalReason, 0, 200) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.recordedBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTeacherAgreement(data) {
+      return data.keys().hasAll(['teacherId', 'teacherUid', 'teacherName', 'modelType', 'fixedMonthlyPaise', 'shareBasisPoints', 'perStudentPaise', 'effectiveFrom', 'effectiveTo', 'notes', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['teacherId', 'teacherUid', 'teacherName', 'modelType', 'fixedMonthlyPaise', 'shareBasisPoints', 'perStudentPaise', 'effectiveFrom', 'effectiveTo', 'notes', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.teacherId) &&
+        isOptionalId(data.teacherUid) &&
+        isShortText(data.teacherName, 1, 120) &&
+        (data.modelType in ['FIXED_SALARY', 'PERCENTAGE', 'PER_STUDENT', 'CUSTOM']) &&
+        isNonNegInt(data.fixedMonthlyPaise) &&
+        data.shareBasisPoints is int && data.shareBasisPoints >= 0 && data.shareBasisPoints <= 10000 &&
+        isNonNegInt(data.perStudentPaise) &&
+        isDateString(data.effectiveFrom) &&
+        isOptionalDateString(data.effectiveTo) &&
+        isShortText(data.notes, 0, 240) &&
+        (data.status in ['ACTIVE', 'SUPERSEDED']) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTeacherShareAllocation(data) {
+      return data.keys().hasAll(['agreementId', 'modelTypeSnapshot', 'rateSnapshotLabel', 'teacherId', 'teacherUid', 'teacherName', 'paymentId', 'invoiceId', 'studentId', 'studentName', 'billingPeriod', 'basisAmountPaise', 'allocatedAmountPaise', 'status', 'payoutId', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['agreementId', 'modelTypeSnapshot', 'rateSnapshotLabel', 'teacherId', 'teacherUid', 'teacherName', 'paymentId', 'invoiceId', 'studentId', 'studentName', 'billingPeriod', 'basisAmountPaise', 'allocatedAmountPaise', 'status', 'payoutId', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isOptionalId(data.agreementId) &&
+        (data.modelTypeSnapshot in ['FIXED_SALARY', 'PERCENTAGE', 'PER_STUDENT', 'CUSTOM']) &&
+        isShortText(data.rateSnapshotLabel, 1, 120) &&
+        isValidId(data.teacherId) &&
+        isOptionalId(data.teacherUid) &&
+        isShortText(data.teacherName, 1, 120) &&
+        isOptionalId(data.paymentId) &&
+        isOptionalId(data.invoiceId) &&
+        isOptionalId(data.studentId) &&
+        isShortText(data.studentName, 0, 120) &&
+        isPeriodString(data.billingPeriod) &&
+        isNonNegInt(data.basisAmountPaise) &&
+        isNonNegInt(data.allocatedAmountPaise) &&
+        (data.status in ['ACCRUED', 'SETTLED', 'REVERSED']) &&
+        isOptionalId(data.payoutId) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTeacherPayout(data) {
+      return data.keys().hasAll(['payoutNumber', 'teacherId', 'teacherUid', 'teacherName', 'billingPeriod', 'amountPaise', 'paymentMethod', 'payoutDate', 'referenceNote', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['payoutNumber', 'teacherId', 'teacherUid', 'teacherName', 'billingPeriod', 'amountPaise', 'paymentMethod', 'payoutDate', 'referenceNote', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isShortText(data.payoutNumber, 3, 48) &&
+        isValidId(data.teacherId) &&
+        isOptionalId(data.teacherUid) &&
+        isShortText(data.teacherName, 1, 120) &&
+        isPeriodString(data.billingPeriod) &&
+        data.amountPaise is int && data.amountPaise > 0 && data.amountPaise <= 100000000000 &&
+        (data.paymentMethod in ['CASH', 'UPI', 'BANK_TRANSFER']) &&
+        isDateString(data.payoutDate) &&
+        isShortText(data.referenceNote, 0, 200) &&
+        (data.status in ['PAID', 'PENDING', 'REVERSED']) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidExpense(data) {
+      return data.keys().hasAll(['title', 'category', 'amountPaise', 'expenseDate', 'billingPeriod', 'paymentMethod', 'vendorName', 'notes', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['title', 'category', 'amountPaise', 'expenseDate', 'billingPeriod', 'paymentMethod', 'vendorName', 'notes', 'status', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isShortText(data.title, 2, 140) &&
+        (data.category in ['RENT', 'UTILITIES', 'MARKETING', 'MATERIALS', 'SOFTWARE', 'MAINTENANCE', 'OTHER']) &&
+        data.amountPaise is int && data.amountPaise > 0 && data.amountPaise <= 100000000000 &&
+        isDateString(data.expenseDate) &&
+        isPeriodString(data.billingPeriod) &&
+        (data.paymentMethod in ['CASH', 'UPI', 'BANK_TRANSFER']) &&
+        isShortText(data.vendorName, 0, 120) &&
+        isShortText(data.notes, 0, 240) &&
+        (data.status in ['RECORDED', 'REVERSED']) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStudentReport(data) {
+      return data.keys().hasAll(['studentId', 'studentName', 'courseId', 'courseName', 'teacherId', 'teacherUid', 'teacherName', 'reportingPeriod', 'subject', 'attendancePercent', 'testMarks', 'maxMarks', 'academicProgress', 'strengths', 'areasForImprovement', 'teacherComments', 'submissionDate', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['studentId', 'studentName', 'courseId', 'courseName', 'teacherId', 'teacherUid', 'teacherName', 'reportingPeriod', 'subject', 'attendancePercent', 'testMarks', 'maxMarks', 'academicProgress', 'strengths', 'areasForImprovement', 'teacherComments', 'submissionDate', 'financeViewerUids', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.studentId) &&
+        isShortText(data.studentName, 1, 120) &&
+        isOptionalId(data.courseId) &&
+        isShortText(data.courseName, 0, 120) &&
+        isValidId(data.teacherId) &&
+        isOptionalId(data.teacherUid) &&
+        isShortText(data.teacherName, 1, 120) &&
+        isPeriodString(data.reportingPeriod) &&
+        isShortText(data.subject, 1, 80) &&
+        data.attendancePercent is int && data.attendancePercent >= 0 && data.attendancePercent <= 100 &&
+        data.testMarks is int && data.testMarks >= 0 &&
+        data.maxMarks is int && data.maxMarks >= 1 && data.maxMarks <= 1000 &&
+        data.testMarks <= data.maxMarks &&
+        (data.academicProgress in ['EXCELLENT', 'GOOD', 'SATISFACTORY', 'NEEDS_ATTENTION']) &&
+        isShortText(data.strengths, 0, 400) &&
+        isShortText(data.areasForImprovement, 0, 400) &&
+        isShortText(data.teacherComments, 0, 600) &&
+        isDateString(data.submissionDate) &&
+        isBoundedStringList(data.financeViewerUids, 10) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['actorUid', 'actorEmail', 'actorRole', 'entityType', 'entityId', 'action', 'summary', 'amountPaise', 'createdAt']) &&
+        data.keys().hasOnly(['actorUid', 'actorEmail', 'actorRole', 'entityType', 'entityId', 'action', 'summary', 'amountPaise', 'createdAt']) &&
+        isValidId(data.actorUid) &&
+        isShortText(data.actorEmail, 3, 160) &&
+        (data.actorRole in ['ADMIN', 'TEACHER', 'ACCOUNTANT']) &&
+        isShortText(data.entityType, 2, 64) &&
+        isValidId(data.entityId) &&
+        isShortText(data.action, 2, 64) &&
+        isShortText(data.summary, 2, 300) &&
+        isNonNegInt(data.amountPaise) &&
+        data.createdAt is timestamp;
+    }
+
+    // ---------------------------------------------------------
+    // Collection Match Blocks (All 15 Collections — Full Authorized Edit & Delete)
+    // ---------------------------------------------------------
+
+    // 1. Users (PII-isolated to owner and admin)
+    match /users/{userId} {
+      allow get: if isVerified() && isValidId(userId) && (userId == request.auth.uid || isAdmin());
+      allow list: if isVerified() && (existing().uid == request.auth.uid || isBootstrappedOwner());
+
+      allow create: if isVerified() && isValidId(userId) && isValidUser(incoming()) &&
+        incoming().uid == userId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (
+          (userId == request.auth.uid && incoming().status == 'ACTIVE' && (
+            (isBootstrappedOwner() && incoming().role == 'ADMIN') ||
+            (!isBootstrappedOwner() && incoming().role == 'TEACHER')
+          )) ||
+          isAdmin()
+        );
+
+      allow update: if isVerified() && isValidId(userId) && isValidUser(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          (isAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'role', 'teacherId', 'status', 'updatedAt'])) ||
+          (userId == request.auth.uid &&
+            existing().status == 'ACTIVE' &&
+            incoming().role == existing().role &&
+            incoming().status == existing().status &&
+            incoming().email == existing().email &&
+            incoming().teacherId == existing().teacherId &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt']))
+        );
+
+      allow delete: if isVerified() && isValidId(userId) && isAdmin() && userId != request.auth.uid;
+    }
+
+    // 2. Institute Settings
+    match /institute_settings/{settingId} {
+      allow get: if isVerified() && isValidId(settingId) && (isFinanceStaff() || isTeacher());
+      allow list: if false;
+
+      allow create: if isVerified() && isValidId(settingId) && isValidInstituteSettings(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+
+      allow update: if isVerified() && isValidId(settingId) && isValidInstituteSettings(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['instituteName', 'logoUrl', 'tagline', 'phone', 'email', 'address', 'city', 'receiptPrefix', 'defaultDueDay', 'financialYearStartMonth', 'updatedBy', 'updatedAt'])
+        );
+
+      allow delete: if isVerified() && isValidId(settingId) && isAdmin();
+    }
+
+    // 3. Courses
+    match /courses/{courseId} {
+      allow get: if isVerified() && isValidId(courseId) && (isFinanceStaff() || isTeacher());
+      allow list: if isVerified() && isAuthorizedFinanceListViewer();
+
+      allow create: if isVerified() && isValidId(courseId) && isValidCourse(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+
+      allow update: if isVerified() && isValidId(courseId) && isValidCourse(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['code', 'name', 'subjectCategory', 'defaultMonthlyFeePaise', 'durationMonths', 'status', 'financeViewerUids', 'updatedAt'])
+        );
+
+      allow delete: if isVerified() && isValidId(courseId) && isAdmin();
+    }
+
+    // 4. Batches
+    match /batches/{batchId} {
+      allow get: if isVerified() && isValidId(batchId) && (isFinanceStaff() || existing().teacherUid == request.auth.uid);
+      allow list: if isVerified() && (isAuthorizedFinanceListViewer() || existing().teacherUid == request.auth.uid);
+
+      allow create: if isVerified() && isValidId(batchId) && isValidBatch(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/courses/$(incoming().courseId)) &&
+        exists(/databases/$(database)/documents/teachers/$(incoming().teacherId)) &&
+        isAdmin();
+
+      allow update: if isVerified() && isValidId(batchId) && isValidBatch(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['code', 'name', 'courseId', 'courseName', 'teacherId', 'teacherUid', 'teacherName', 'scheduleLabel', 'status', 'financeViewerUids', 'updatedAt'])
+        );
+
+      allow delete: if isVerified() && isValidId(batchId) && isAdmin();
+    }
+
+    // 5. Teachers
+    match /teachers/{teacherId} {
+      allow get: if isVerified() && isValidId(teacherId) && (isFinanceStaff() || existing().linkedUserUid == request.auth.uid);
+      allow list: if isVerified() && (isAuthorizedFinanceListViewer() || existing().linkedUserUid == request.auth.uid);
+
+      allow create: if isVerified() && isValidId(teacherId) && isValidTeacher(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+
+      allow update: if isVerified() && isValidId(teacherId) && isValidTeacher(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['teacherCode', 'fullName', 'email', 'phone', 'specialization', 'subjects', 'linkedUserUid', 'joinedDate', 'status', 'financeViewerUids', 'updatedAt'])
+        );
+
+      allow delete: if isVerified() && isValidId(teacherId) && isAdmin();
+    }
+
+    // 6. Students
+    match /students/{studentId} {
+      allow get: if isVerified() && isValidId(studentId) && (isFinanceStaff() || existing().assignedTeacherUid == request.auth.uid);
+      allow list: if isVerified() && (isAuthorizedFinanceListViewer() || existing().assignedTeacherUid == request.auth.uid);
+
+      allow create: if isVerified() && isValidId(studentId) && isValidStudent(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/courses/$(incoming().primaryCourseId)) &&
+        exists(/databases/$(database)/documents/batches/$(incoming().batchId)) &&
+        exists(/databases/$(database)/documents/teachers/$(incoming().assignedTeacherId)) &&
+        isAdmin();
+
+      allow update: if isVerified() && isValidId(studentId) && isValidStudent(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['studentCode', 'fullName', 'primaryCourseId', 'primaryCourseName', 'courseIds', 'batchId', 'batchName', 'enrollmentDate', 'monthlyFeePaise', 'paymentSchedule', 'status', 'guardianName', 'guardianPhone', 'assignedTeacherId', 'assignedTeacherUid', 'assignedTeacherName', 'financeViewerUids', 'updatedAt'])
+        );
+
+      allow delete: if isVerified() && isValidId(studentId) && isAdmin();
+    }
+
+    // 7. Enrollments
+    match /enrollments/{enrollmentId} {
+      allow get: if isVerified() && isValidId(enrollmentId) && (isFinanceStaff() || existing().assignedTeacherUid == request.auth.uid);
+      allow list: if isVerified() && (isAuthorizedFinanceListViewer() || existing().assignedTeacherUid == request.auth.uid);
+
+      allow create: if isVerified() && isValidId(enrollmentId) && isValidEnrollment(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/students/$(incoming().studentId)) &&
+        exists(/databases/$(database)/documents/courses/$(incoming().courseId)) &&
+        isAdmin();
+
+      allow update: if isVerified() && isValidId(enrollmentId) && isValidEnrollment(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().studentId == existing().studentId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['studentName', 'courseId', 'courseName', 'batchId', 'teacherId', 'assignedTeacherUid', 'agreedFeePaise', 'startDate', 'status', 'financeViewerUids', 'updatedAt'])
+        );
+
+      allow delete: if isVerified() && isValidId(enrollmentId) && isAdmin();
+    }
+
+    // 8. Invoices (Strictly Admin & Accountant; Teachers blocked)
+    match /invoices/{invoiceId} {
+      allow get: if isVerified() && isValidId(invoiceId) && isFinanceStaff();
+      allow list: if isVerified() && isAuthorizedFinanceListViewer();
+
+      allow create: if isVerified() && isValidId(invoiceId) && isValidInvoice(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/students/$(incoming().studentId)) &&
+        isFinanceStaff();
+
+      allow update: if isVerified() && isValidId(invoiceId) && isValidInvoice(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().studentId == existing().studentId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (isAccountant() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['courseId', 'courseName', 'billingPeriod', 'grossAmountPaise', 'discountPaise', 'netAmountDuePaise', 'paidAmountPaise', 'balanceDuePaise', 'dueDate', 'status', 'notes', 'updatedAt']))
+        );
+
+      allow delete: if isVerified() && isValidId(invoiceId) && isFinanceStaff();
+    }
+
+    // 9. Payments (Editable & Deletable by Finance Staff with strict validation)
+    match /payments/{paymentId} {
+      allow get: if isVerified() && isValidId(paymentId) && isFinanceStaff();
+      allow list: if isVerified() && (
+        isBootstrappedOwner() ||
+        existing().recordedBy == request.auth.uid ||
+        (request.auth.uid in existing().financeViewerUids)
+      );
+
+      allow create: if isVerified() && isValidId(paymentId) && isValidPayment(incoming()) &&
+        incoming().recordedBy == request.auth.uid &&
+        incoming().status == 'COMPLETED' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/invoices/$(incoming().invoiceId)) &&
+        exists(/databases/$(database)/documents/students/$(incoming().studentId)) &&
+        isFinanceStaff();
+
+      allow update: if isVerified() && isValidId(paymentId) && isValidPayment(incoming()) &&
+        incoming().recordedBy == existing().recordedBy &&
+        incoming().idempotencyKey == existing().idempotencyKey &&
+        incoming().invoiceId == existing().invoiceId &&
+        incoming().studentId == existing().studentId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (isAccountant() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['amountPaise', 'paymentMethod', 'paymentDate', 'billingPeriod', 'referenceNote', 'status', 'reversalReason', 'updatedAt']))
+        );
+
+      allow delete: if isVerified() && isValidId(paymentId) && isFinanceStaff();
+    }
+
+    // 10. Teacher Agreements
+    match /teacher_agreements/{agreementId} {
+      allow get: if isVerified() && isValidId(agreementId) && (isFinanceStaff() || existing().teacherUid == request.auth.uid);
+      allow list: if isVerified() && (isAuthorizedFinanceListViewer() || existing().teacherUid == request.auth.uid);
+
+      allow create: if isVerified() && isValidId(agreementId) && isValidTeacherAgreement(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/teachers/$(incoming().teacherId)) &&
+        isAdmin();
+
+      allow update: if isVerified() && isValidId(agreementId) && isValidTeacherAgreement(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().teacherId == existing().teacherId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['modelType', 'fixedMonthlyPaise', 'shareBasisPoints', 'perStudentPaise', 'effectiveFrom', 'effectiveTo', 'notes', 'status', 'teacherUid', 'teacherName', 'financeViewerUids', 'updatedAt'])
+        );
+
+      allow delete: if isVerified() && isValidId(agreementId) && isAdmin();
+    }
+
+    // 11. Teacher Share Allocations
+    match /teacher_share_allocations/{allocationId} {
+      allow get: if isVerified() && isValidId(allocationId) && (isFinanceStaff() || existing().teacherUid == request.auth.uid);
+      allow list: if isVerified() && (isAuthorizedFinanceListViewer() || existing().teacherUid == request.auth.uid);
+
+      allow create: if isVerified() && isValidId(allocationId) && isValidTeacherShareAllocation(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/teachers/$(incoming().teacherId)) &&
+        isFinanceStaff();
+
+      allow update: if isVerified() && isValidId(allocationId) && isValidTeacherShareAllocation(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().teacherId == existing().teacherId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (isAccountant() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['rateSnapshotLabel', 'billingPeriod', 'basisAmountPaise', 'allocatedAmountPaise', 'status', 'payoutId', 'updatedAt']))
+        );
+
+      allow delete: if isVerified() && isValidId(allocationId) && isFinanceStaff();
+    }
+
+    // 12. Teacher Payouts
+    match /teacher_payouts/{payoutId} {
+      allow get: if isVerified() && isValidId(payoutId) && (isFinanceStaff() || existing().teacherUid == request.auth.uid);
+      allow list: if isVerified() && (isAuthorizedFinanceListViewer() || existing().teacherUid == request.auth.uid);
+
+      allow create: if isVerified() && isValidId(payoutId) && isValidTeacherPayout(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/teachers/$(incoming().teacherId)) &&
+        isFinanceStaff();
+
+      allow update: if isVerified() && isValidId(payoutId) && isValidTeacherPayout(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/teachers/$(incoming().teacherId)) &&
+        (
+          isAdmin() ||
+          (isAccountant() &&
+            incoming().teacherId == existing().teacherId &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['billingPeriod', 'amountPaise', 'paymentMethod', 'payoutDate', 'referenceNote', 'status', 'updatedAt']))
+        );
+
+      allow delete: if isVerified() && isValidId(payoutId) && isFinanceStaff();
+    }
+
+    // 13. Expenses
+    match /expenses/{expenseId} {
+      allow get: if isVerified() && isValidId(expenseId) && isFinanceStaff();
+      allow list: if isVerified() && isAuthorizedFinanceListViewer();
+
+      allow create: if isVerified() && isValidId(expenseId) && isValidExpense(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().status == 'RECORDED' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isFinanceStaff();
+
+      allow update: if isVerified() && isValidId(expenseId) && isValidExpense(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (isAccountant() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'category', 'amountPaise', 'expenseDate', 'billingPeriod', 'paymentMethod', 'vendorName', 'notes', 'status', 'updatedAt']))
+        );
+
+      allow delete: if isVerified() && isValidId(expenseId) && isFinanceStaff();
+    }
+
+    // 14. Student Performance Reports
+    match /student_reports/{reportId} {
+      allow get: if isVerified() && isValidId(reportId) && (isAdmin() || existing().teacherUid == request.auth.uid);
+      allow list: if isVerified() && (isAuthorizedFinanceListViewer() || existing().teacherUid == request.auth.uid);
+
+      allow create: if isVerified() && isValidId(reportId) && isValidStudentReport(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/students/$(incoming().studentId)) &&
+        (
+          isAdmin() ||
+          (isTeacher() &&
+            incoming().teacherUid == request.auth.uid &&
+            get(/databases/$(database)/documents/students/$(incoming().studentId)).data.assignedTeacherUid == request.auth.uid)
+        );
+
+      allow update: if isVerified() && isValidId(reportId) && isValidStudentReport(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().studentId == existing().studentId &&
+        incoming().teacherId == existing().teacherId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (isTeacher() && existing().teacherUid == request.auth.uid && incoming().teacherUid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['reportingPeriod', 'subject', 'attendancePercent', 'testMarks', 'maxMarks', 'academicProgress', 'strengths', 'areasForImprovement', 'teacherComments', 'submissionDate', 'updatedAt']))
+        );
+
+      allow delete: if isVerified() && isValidId(reportId) && (
+        isAdmin() ||
+        (isTeacher() && existing().teacherUid == request.auth.uid)
+      );
+    }
+
+    // 15. Audit Logs (Editable & Deletable strictly by Admin)
+    match /audit_logs/{logId} {
+      allow get: if isVerified() && isValidId(logId) && isAdmin();
+      allow list: if isVerified() && (isBootstrappedOwner() || existing().actorUid == request.auth.uid);
+
+      allow create: if isVerified() && isValidId(logId) && isValidAuditLog(incoming()) &&
+        incoming().actorUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        (isFinanceStaff() || isTeacher());
+
+      allow update: if isVerified() && isValidId(logId) && isValidAuditLog(incoming()) &&
+        incoming().actorUid == existing().actorUid &&
+        incoming().createdAt == existing().createdAt &&
+        (
+          isAdmin() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['action', 'summary', 'amountPaise'])
+        );
+
+      allow delete: if isVerified() && isValidId(logId) && isAdmin();
+    }
+  }
+}

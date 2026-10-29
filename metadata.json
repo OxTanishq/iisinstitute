@@ -1,0 +1,6 @@
+{
+  "name": "IIS Institute Management System",
+  "description": "Production-grade management and financial analytics platform for IIS Institute covering student enrollments, fee collection, teacher revenue shares, academic performance reports, and growth insights.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
